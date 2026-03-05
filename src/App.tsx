@@ -75,9 +75,17 @@ export default function App() {
 
     const zalacznikiStr = zalaczniki.join('\n');
 
+    // Parse claim number
+    let numerSzkody = '';
+    const numerSzkodyLine = lines.find(l => l.trim().startsWith('Numer szkody:'));
+    if (numerSzkodyLine) {
+      numerSzkody = numerSzkodyLine.replace('Numer szkody:', '').trim();
+    }
+
     // Create Excel workbook and worksheet
     const data = [
       {
+        'Numer szkody': numerSzkody,
         'Temat': temat,
         'Nadawca': nadawca,
         'Data wpływu': dataWplywu,
@@ -91,6 +99,7 @@ export default function App() {
 
     // Set column widths
     const wscols = [
+      { wch: 25 }, // Numer szkody
       { wch: 40 }, // Temat
       { wch: 30 }, // Nadawca
       { wch: 20 }, // Data wpływu
@@ -103,6 +112,16 @@ export default function App() {
   };
 
   const generateSummary = async (data: EmailData) => {
+    // Check for claim number in subject
+    const claimNumberRegex = /[A-Z]{2,3}\d+-\d{5}\/\d{2}-\d{2}/;
+    const match = data.subject?.match(claimNumberRegex);
+    
+    if (!match) {
+      setSummary("Brak numeru szkody w tytule maila");
+      return;
+    }
+
+    const claimNumber = match[0];
     setIsGeneratingSummary(true);
     try {
       const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || '' });
@@ -110,6 +129,7 @@ export default function App() {
       const parts: any[] = [
         {
           text: `Zadanie: odczytaj i zinterpretuj treść załączników przy użyciu OCR dla PDF/obrazów oraz analizy metadanych. Następnie wygeneruj wyłącznie tekst zawierający:
+Numer szkody: <numer szkody z sekcji "Dane wejściowe">
 Temat: <temat maila>
 Nadawca: <adres e-mail nadawcy>
 Data wpływu: <wstaw dokładnie wartość z pola "Data otrzymania maila" poniżej, nie zmieniaj jej>
@@ -147,6 +167,7 @@ Reguły klasyfikacji (stosuj w tej kolejności):
 Ważne: Pole "Data wpływu" MUSI być identyczne z "Data otrzymania maila" z sekcji "Dane wejściowe". Pod żadnym pozorem nie szukaj innej daty w załącznikach.
 
 Wyjście: wyłącznie czysty tekst w poniższym formacie (bez żadnych dodatkowych wyjaśnień):
+Numer szkody: <…>
 Temat: <…>
 Nadawca: <…>
 Data wpływu: <…>
@@ -154,6 +175,7 @@ Załączniki:
 <nazwa_pliku> — <etykieta>
 
 Dane wejściowe:
+Numer szkody: ${claimNumber}
 Temat: ${data.subject || ''}
 Nadawca: ${data.senderEmail || data.senderName || ''}
 Data otrzymania maila: ${formatDate(data.receivedTime)}
