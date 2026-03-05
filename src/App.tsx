@@ -30,13 +30,19 @@ interface EmailData {
   receivedTime?: string;
 }
 
+interface AnalysisJob {
+  id: string;
+  fileName: string;
+  emailData: EmailData | null;
+  summary: string | null;
+  status: 'parsing' | 'analyzing' | 'completed' | 'error';
+  error: string | null;
+  isGenerating: boolean;
+}
+
 export default function App() {
-  const [emailData, setEmailData] = useState<EmailData | null>(null);
+  const [jobs, setJobs] = useState<AnalysisJob[]>([]);
   const [isDragging, setIsDragging] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [isLoading, setIsLoading] = useState(false);
-  const [summary, setSummary] = useState<string | null>(null);
-  const [isGeneratingSummary, setIsGeneratingSummary] = useState(false);
   const [copied, setCopied] = useState(false);
 
   const formatDate = (dateStr?: string) => {
@@ -48,56 +54,66 @@ export default function App() {
   };
 
   const downloadExcel = () => {
-    if (!summary) return;
+    const completedJobs = jobs.filter(j => j.summary && j.status === 'completed');
+    if (completedJobs.length === 0) return;
 
-    // Parse summary
-    const lines = summary.split('\n');
-    let temat = '';
-    let nadawca = '';
-    let dataWplywu = '';
-    let zalaczniki: string[] = [];
-    let isZalacznikiSection = false;
-
-    lines.forEach(line => {
-      const trimmedLine = line.trim();
-      if (trimmedLine.startsWith('Temat:')) {
-        temat = trimmedLine.replace('Temat:', '').trim();
-      } else if (trimmedLine.startsWith('Nadawca:')) {
-        nadawca = trimmedLine.replace('Nadawca:', '').trim();
-      } else if (trimmedLine.startsWith('Data wpływu:')) {
-        dataWplywu = trimmedLine.replace('Data wpływu:', '').trim();
-      } else if (trimmedLine.startsWith('Załączniki:')) {
-        isZalacznikiSection = true;
-      } else if (isZalacznikiSection && trimmedLine) {
-        zalaczniki.push(`• ${trimmedLine}`);
+    const allData = completedJobs.map(job => {
+      const summary = job.summary!;
+      
+      if (summary === "Brak numeru szkody w tytule maila") {
+        return {
+          'Numer szkody': 'BRAK',
+          'Temat': job.emailData?.subject || job.fileName,
+          'Nadawca': job.emailData?.senderEmail || '',
+          'Data wpływu': job.emailData?.receivedTime ? formatDate(job.emailData.receivedTime) : '',
+          'Załączniki': 'N/A (Brak numeru szkody)'
+        };
       }
+
+      const lines = summary.split('\n');
+      let temat = '';
+      let nadawca = '';
+      let dataWplywu = '';
+      let zalaczniki: string[] = [];
+      let isZalacznikiSection = false;
+
+      lines.forEach(line => {
+        const trimmedLine = line.trim();
+        if (trimmedLine.startsWith('Temat:')) {
+          temat = trimmedLine.replace('Temat:', '').trim();
+        } else if (trimmedLine.startsWith('Nadawca:')) {
+          nadawca = trimmedLine.replace('Nadawca:', '').trim();
+        } else if (trimmedLine.startsWith('Data wpływu:')) {
+          dataWplywu = trimmedLine.replace('Data wpływu:', '').trim();
+        } else if (trimmedLine.startsWith('Załączniki:')) {
+          isZalacznikiSection = true;
+        } else if (isZalacznikiSection && trimmedLine) {
+          zalaczniki.push(`• ${trimmedLine}`);
+        }
+      });
+
+      const zalacznikiStr = zalaczniki.join('\n');
+
+      // Parse claim number
+      let numerSzkody = '';
+      const numerSzkodyLine = lines.find(l => l.trim().startsWith('Numer szkody:'));
+      if (numerSzkodyLine) {
+        numerSzkody = numerSzkodyLine.replace('Numer szkody:', '').trim();
+      }
+
+      return {
+        'Numer szkody': numerSzkody,
+        'Temat': temat || job.emailData?.subject || '',
+        'Nadawca': nadawca || job.emailData?.senderEmail || '',
+        'Data wpływu': dataWplywu || (job.emailData?.receivedTime ? formatDate(job.emailData.receivedTime) : ''),
+        'Załączniki': zalacznikiStr
+      };
     });
 
-    const zalacznikiStr = zalaczniki.join('\n');
-
-    // Parse claim number
-    let numerSzkody = '';
-    const numerSzkodyLine = lines.find(l => l.trim().startsWith('Numer szkody:'));
-    if (numerSzkodyLine) {
-      numerSzkody = numerSzkodyLine.replace('Numer szkody:', '').trim();
-    }
-
-    // Create Excel workbook and worksheet
-    const data = [
-      {
-        'Numer szkody': numerSzkody,
-        'Temat': temat,
-        'Nadawca': nadawca,
-        'Data wpływu': dataWplywu,
-        'Załączniki': zalacznikiStr
-      }
-    ];
-
-    const worksheet = XLSX.utils.json_to_sheet(data);
+    const worksheet = XLSX.utils.json_to_sheet(allData);
     const workbook = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(workbook, worksheet, "Analiza");
 
-    // Set column widths
     const wscols = [
       { wch: 25 }, // Numer szkody
       { wch: 40 }, // Temat
@@ -107,22 +123,22 @@ export default function App() {
     ];
     worksheet['!cols'] = wscols;
 
-    // Generate Excel file and trigger download
-    XLSX.writeFile(workbook, `analiza_${new Date().getTime()}.xlsx`);
+    XLSX.writeFile(workbook, `analiza_zbiorcza_${new Date().getTime()}.xlsx`);
   };
 
-  const generateSummary = async (data: EmailData) => {
+  const generateSummary = async (jobId: string, data: EmailData) => {
     // Check for claim number in subject
     const claimNumberRegex = /[A-Z]{2,3}\d+-\d{5}\/\d{2}-\d{2}/;
     const match = data.subject?.match(claimNumberRegex);
     
     if (!match) {
-      setSummary("Brak numeru szkody w tytule maila");
+      setJobs(prev => prev.map(j => j.id === jobId ? { ...j, summary: "Brak numeru szkody w tytule maila", status: 'completed', isGenerating: false } : j));
       return;
     }
 
     const claimNumber = match[0];
-    setIsGeneratingSummary(true);
+    setJobs(prev => prev.map(j => j.id === jobId ? { ...j, isGenerating: true, status: 'analyzing' } : j));
+    
     try {
       const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || '' });
       
@@ -183,8 +199,6 @@ Data otrzymania maila: ${formatDate(data.receivedTime)}
         }
       ];
 
-      // Add attachments to parts for multimodal analysis
-      // Limit to first 10 attachments to avoid token limits
       const attachmentsToProcess = data.attachments.slice(0, 10);
       
       for (const att of attachmentsToProcess) {
@@ -193,7 +207,6 @@ Data otrzymania maila: ${formatDate(data.receivedTime)}
         const isPdf = ext === 'pdf';
 
         if (isImage || isPdf) {
-          // Convert Uint8Array to base64
           const base64 = btoa(
             new Uint8Array(att.content).reduce(
               (data, byte) => data + String.fromCharCode(byte),
@@ -208,10 +221,8 @@ Data otrzymania maila: ${formatDate(data.receivedTime)}
             }
           });
           
-          // Also add filename as text context for this part
           parts.push({ text: `Plik: ${att.fileName}` });
         } else {
-          // For other files, just provide the name
           parts.push({ text: `Plik (tylko nazwa): ${att.fileName}` });
         }
       }
@@ -221,89 +232,89 @@ Data otrzymania maila: ${formatDate(data.receivedTime)}
         contents: [{ parts }],
       });
 
-      setSummary(response.text || "Błąd generowania podsumowania.");
+      setJobs(prev => prev.map(j => j.id === jobId ? { ...j, summary: response.text || "Błąd generowania podsumowania.", status: 'completed', isGenerating: false } : j));
     } catch (err) {
       console.error('Error generating summary:', err);
-      setSummary("Wystąpił błąd podczas analizy załączników przez AI.");
-    } finally {
-      setIsGeneratingSummary(false);
+      setJobs(prev => prev.map(j => j.id === jobId ? { ...j, summary: "Wystąpił błąd podczas analizy załączników przez AI.", status: 'error', isGenerating: false } : j));
     }
   };
 
-  const processFile = async (file: File) => {
-    if (!file.name.toLowerCase().endsWith('.msg')) {
-      setError('Please upload a valid .msg file');
-      return;
-    }
+  const processFiles = async (files: FileList | File[]) => {
+    const fileArray = Array.from(files).filter(f => f.name.toLowerCase().endsWith('.msg'));
+    
+    if (fileArray.length === 0) return;
 
-    setIsLoading(true);
-    setError(null);
-    setSummary(null);
+    const newJobs: AnalysisJob[] = fileArray.map(file => ({
+      id: Math.random().toString(36).substring(7),
+      fileName: file.name,
+      emailData: null,
+      summary: null,
+      status: 'parsing',
+      error: null,
+      isGenerating: false
+    }));
 
-    try {
-      const arrayBuffer = await file.arrayBuffer();
-      const reader = new MsgReader(arrayBuffer);
-      const data = reader.getFileData();
+    setJobs(prev => [...prev, ...newJobs]);
 
-      if (!data) {
-        throw new Error('Failed to parse MSG file data');
+    fileArray.forEach(async (file, index) => {
+      const jobId = newJobs[index].id;
+      try {
+        const arrayBuffer = await file.arrayBuffer();
+        const reader = new MsgReader(arrayBuffer);
+        const data = reader.getFileData();
+
+        if (!data) throw new Error('Failed to parse MSG file data');
+
+        const rawAttachments = (Array.isArray(data.attachments) ? data.attachments : []).filter(Boolean);
+        
+        const attachments: Attachment[] = rawAttachments
+          .map((att: any) => {
+            const fullAttachment = reader.getAttachment(att);
+            return {
+              fileName: fullAttachment.fileName || fullAttachment.name || att.fileName || att.name || 'unnamed_attachment',
+              content: fullAttachment.content || att.content || new Uint8Array(0),
+              extension: fullAttachment.extension || att.extension
+            };
+          })
+          .filter(att => {
+            const name = att.fileName.toLowerCase();
+            const isOutlookPng = name.endsWith('.png') && name.includes('outlook');
+            return !isOutlookPng;
+          });
+
+        const extractDateFromHeaders = (headers?: string) => {
+          if (!headers) return null;
+          const match = headers.match(/^Date:\s*(.*)$/m);
+          return match ? match[1] : null;
+        };
+
+        const parsedData: EmailData = {
+          subject: data.subject,
+          senderName: data.senderName,
+          senderEmail: data.senderEmail,
+          body: data.body,
+          bodyHTML: data.bodyHTML,
+          receivedTime: data.messageDate || extractDateFromHeaders(data.headers) || data.creationTime,
+          attachments: attachments
+        };
+
+        setJobs(prev => prev.map(j => j.id === jobId ? { ...j, emailData: parsedData, status: 'analyzing' } : j));
+        generateSummary(jobId, parsedData);
+      } catch (err) {
+        console.error('Error parsing MSG file:', err);
+        setJobs(prev => prev.map(j => j.id === jobId ? { ...j, status: 'error', error: 'Failed to parse the email file.' } : j));
       }
-
-      // Map msgreader data to our interface
-      const rawAttachments = (Array.isArray(data.attachments) ? data.attachments : []).filter(Boolean);
-      
-      const attachments: Attachment[] = rawAttachments
-        .map((att: any) => {
-          const fullAttachment = reader.getAttachment(att);
-          return {
-            fileName: fullAttachment.fileName || fullAttachment.name || att.fileName || att.name || 'unnamed_attachment',
-            content: fullAttachment.content || att.content || new Uint8Array(0),
-            extension: fullAttachment.extension || att.extension
-          };
-        })
-        .filter(att => {
-          const name = att.fileName.toLowerCase();
-          const isOutlookPng = name.endsWith('.png') && name.includes('outlook');
-          return !isOutlookPng;
-        });
-
-      const extractDateFromHeaders = (headers?: string) => {
-        if (!headers) return null;
-        const match = headers.match(/^Date:\s*(.*)$/m);
-        return match ? match[1] : null;
-      };
-
-      const parsedData: EmailData = {
-        subject: data.subject,
-        senderName: data.senderName,
-        senderEmail: data.senderEmail,
-        body: data.body,
-        bodyHTML: data.bodyHTML,
-        receivedTime: data.messageDate || extractDateFromHeaders(data.headers) || data.creationTime,
-        attachments: attachments
-      };
-
-      setEmailData(parsedData);
-      // Automatically generate summary
-      generateSummary(parsedData);
-    } catch (err) {
-      console.error('Error parsing MSG file:', err);
-      setError('Failed to parse the email file. It might be corrupted or in an unsupported format.');
-    } finally {
-      setIsLoading(false);
-    }
+    });
   };
 
   const onDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
     setIsDragging(false);
-    const file = e.dataTransfer.files[0];
-    if (file) processFile(file);
+    if (e.dataTransfer.files) processFiles(e.dataTransfer.files);
   }, []);
 
   const onFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file) processFile(file);
+    if (e.target.files) processFiles(e.target.files);
   };
 
   const downloadAttachment = (att: Attachment) => {
@@ -318,18 +329,18 @@ Data otrzymania maila: ${formatDate(data.receivedTime)}
     URL.revokeObjectURL(url);
   };
 
-  const copyToClipboard = () => {
-    if (summary) {
-      navigator.clipboard.writeText(summary);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    }
+  const copyToClipboard = (text: string) => {
+    navigator.clipboard.writeText(text);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
   };
 
   const reset = () => {
-    setEmailData(null);
-    setError(null);
-    setSummary(null);
+    setJobs([]);
+  };
+
+  const removeJob = (id: string) => {
+    setJobs(prev => prev.filter(j => j.id !== id));
   };
 
   return (
@@ -341,205 +352,182 @@ Data otrzymania maila: ${formatDate(data.receivedTime)}
             <h1 className="text-3xl font-semibold tracking-tight">MSG Extractor & AI Analyzer</h1>
             <p className="text-[#86868B] mt-1">Extract attachments and classify them using AI</p>
           </div>
-          {emailData && (
-            <button 
-              onClick={reset}
-              className="text-sm font-medium text-[#0066CC] hover:underline flex items-center gap-1"
-            >
-              <X size={14} />
-              Clear
-            </button>
+          {jobs.length > 0 && (
+            <div className="flex items-center gap-4">
+              <button 
+                onClick={downloadExcel}
+                className="text-sm font-medium text-[#0066CC] hover:underline flex items-center gap-1"
+              >
+                <Download size={14} />
+                Export All
+              </button>
+              <button 
+                onClick={reset}
+                className="text-sm font-medium text-[#FF3B30] hover:underline flex items-center gap-1"
+              >
+                <X size={14} />
+                Clear All
+              </button>
+            </div>
           )}
         </header>
 
         <main>
-          <AnimatePresence mode="wait">
-            {!emailData ? (
-              <motion.div
-                key="upload"
-                initial={{ opacity: 0, y: 20 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, scale: 0.95 }}
-                className="relative"
-              >
-                <div
-                  onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
-                  onDragLeave={() => setIsDragging(false)}
-                  onDrop={onDrop}
-                  className={cn(
-                    "relative group cursor-pointer border-2 border-dashed rounded-3xl p-12 transition-all duration-300 flex flex-col items-center justify-center min-h-[400px]",
-                    isDragging 
-                      ? "border-[#0066CC] bg-[#0066CC]/5 scale-[1.02]" 
-                      : "border-[#D2D2D7] bg-white hover:border-[#86868B]"
-                  )}
-                  onClick={() => document.getElementById('file-input')?.click()}
-                >
-                  <input
-                    id="file-input"
-                    type="file"
-                    accept=".msg"
-                    className="hidden"
-                    onChange={onFileChange}
-                  />
-                  
-                  <div className={cn(
-                    "w-20 h-20 rounded-2xl flex items-center justify-center mb-6 transition-transform duration-500 group-hover:scale-110",
-                    isDragging ? "bg-[#0066CC] text-white" : "bg-[#F5F5F7] text-[#86868B]"
-                  )}>
-                    <Upload size={32} />
-                  </div>
-
-                  <h2 className="text-xl font-medium mb-2">
-                    {isLoading ? "Processing..." : "Drop your .msg file here"}
-                  </h2>
-                  <p className="text-[#86868B] text-center max-w-xs">
-                    or click to browse your computer for an Outlook message file
-                  </p>
-
-                  {isLoading && (
-                    <div className="absolute inset-0 bg-white/50 backdrop-blur-sm rounded-3xl flex items-center justify-center">
-                      <div className="flex flex-col items-center">
-                        <div className="w-12 h-12 border-4 border-[#0066CC] border-t-transparent rounded-full animate-spin mb-4" />
-                        <p className="font-medium">Parsing email data...</p>
-                      </div>
-                    </div>
-                  )}
-                </div>
-
-                {error && (
-                  <motion.div 
-                    initial={{ opacity: 0, y: 10 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    className="mt-4 p-4 bg-red-50 border border-red-100 rounded-2xl flex items-center gap-3 text-red-600"
-                  >
-                    <AlertCircle size={20} />
-                    <p className="text-sm font-medium">{error}</p>
-                  </motion.div>
+          <div className="space-y-8">
+            {/* Upload Section */}
+            <motion.div
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="relative"
+            >
+              <div
+                onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
+                onDragLeave={() => setIsDragging(false)}
+                onDrop={onDrop}
+                className={cn(
+                  "relative group cursor-pointer border-2 border-dashed rounded-3xl p-8 transition-all duration-300 flex flex-col items-center justify-center min-h-[200px]",
+                  isDragging 
+                    ? "border-[#0066CC] bg-[#0066CC]/5 scale-[1.01]" 
+                    : "border-[#D2D2D7] bg-white hover:border-[#86868B]"
                 )}
-              </motion.div>
-            ) : (
-              <motion.div
-                key="results"
-                initial={{ opacity: 0, y: 20 }}
-                animate={{ opacity: 1, y: 0 }}
-                className="space-y-6"
+                onClick={() => document.getElementById('file-input')?.click()}
               >
-                {/* AI Summary Card */}
-                <div className="bg-white rounded-3xl p-6 shadow-sm border border-[#D2D2D7]/30 overflow-hidden relative">
-                  <div className="flex items-center justify-between mb-4">
-                    <h3 className="text-sm font-semibold uppercase tracking-wider text-[#86868B] flex items-center gap-2">
-                      <Check size={16} className="text-emerald-500" />
-                      AI Analysis Summary
-                    </h3>
-                    {summary && (
-                      <div className="flex items-center gap-2">
-                        <button 
-                          onClick={downloadExcel}
-                          className="p-2 hover:bg-[#F5F5F7] rounded-lg transition-colors text-[#86868B] hover:text-[#1D1D1F]"
-                          title="Download Excel"
-                        >
-                          <Download size={18} />
-                        </button>
-                        <button 
-                          onClick={copyToClipboard}
-                          className="p-2 hover:bg-[#F5F5F7] rounded-lg transition-colors text-[#86868B] hover:text-[#1D1D1F]"
-                          title="Copy to clipboard"
-                        >
-                          {copied ? <Check size={18} className="text-emerald-500" /> : <Copy size={18} />}
-                        </button>
-                      </div>
-                    )}
-                  </div>
-
-                  <div className="min-h-[100px] bg-[#F5F5F7] rounded-2xl p-5 font-mono text-sm leading-relaxed whitespace-pre-wrap relative">
-                    {isGeneratingSummary ? (
-                      <div className="flex flex-col items-center justify-center py-8 space-y-3">
-                        <div className="w-6 h-6 border-2 border-[#0066CC] border-t-transparent rounded-full animate-spin" />
-                        <p className="text-[#86868B] animate-pulse">AI is analyzing attachments...</p>
-                      </div>
-                    ) : (
-                      summary || "Waiting for analysis..."
-                    )}
-                  </div>
+                <input
+                  id="file-input"
+                  type="file"
+                  accept=".msg"
+                  multiple
+                  className="hidden"
+                  onChange={onFileChange}
+                />
+                
+                <div className={cn(
+                  "w-12 h-12 rounded-xl flex items-center justify-center mb-4 transition-transform duration-500 group-hover:scale-110",
+                  isDragging ? "bg-[#0066CC] text-white" : "bg-[#F5F5F7] text-[#86868B]"
+                )}>
+                  <Upload size={24} />
                 </div>
 
-                {/* Email Info Card */}
-                <div className="bg-white rounded-3xl p-6 shadow-sm border border-[#D2D2D7]/30">
-                  <div className="flex items-start gap-4 mb-6">
-                    <div className="w-12 h-12 bg-[#F5F5F7] rounded-xl flex items-center justify-center text-[#1D1D1F] shrink-0">
-                      <Mail size={24} />
+                <h2 className="text-lg font-medium mb-1">
+                  Drop your .msg files here
+                </h2>
+                <p className="text-[#86868B] text-sm text-center">
+                  or click to browse. You can select multiple files.
+                </p>
+              </div>
+            </motion.div>
+
+            {/* Jobs List */}
+            <div className="space-y-6">
+              {jobs.map((job) => (
+                <motion.div
+                  key={job.id}
+                  initial={{ opacity: 0, x: -20 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  className="bg-white rounded-3xl shadow-sm border border-[#D2D2D7]/30 overflow-hidden"
+                >
+                  {/* Job Header */}
+                  <div className="bg-[#F5F5F7]/50 px-6 py-3 border-bottom border-[#D2D2D7]/20 flex items-center justify-between">
+                    <div className="flex items-center gap-2 text-[#86868B]">
+                      <FileText size={16} />
+                      <span className="text-xs font-medium truncate max-w-[200px] md:max-w-md">
+                        {job.fileName}
+                      </span>
                     </div>
-                    <div className="flex-1 min-w-0">
-                      <h2 className="text-xl font-semibold leading-tight truncate">
-                        {emailData.subject || '(No Subject)'}
-                      </h2>
-                      <div className="flex flex-wrap gap-x-4 gap-y-1 mt-2 text-sm text-[#86868B]">
-                        <div className="flex items-center gap-1.5">
-                          <User size={14} />
-                          <span>{emailData.senderName || emailData.senderEmail || 'Unknown Sender'}</span>
-                        </div>
-                        {emailData.receivedTime && (
-                          <div className="flex items-center gap-1.5">
-                            <Calendar size={14} />
-                            <span>{formatDate(emailData.receivedTime)}</span>
-                          </div>
-                        )}
-                      </div>
-                    </div>
+                    <button 
+                      onClick={() => removeJob(job.id)}
+                      className="p-1 hover:bg-[#E8E8ED] rounded-full text-[#86868B] transition-colors"
+                    >
+                      <X size={14} />
+                    </button>
                   </div>
 
-                  {/* Attachments Section */}
-                  <div className="border-t border-[#F5F5F7] pt-6">
-                    <div className="flex items-center justify-between mb-4">
-                      <h3 className="text-sm font-semibold uppercase tracking-wider text-[#86868B] flex items-center gap-2">
-                        <Paperclip size={16} />
-                        Attachments ({emailData.attachments?.length || 0})
-                      </h3>
-                    </div>
+                  <div className="p-6">
+                    <AnimatePresence mode="wait">
+                      {job.status === 'parsing' ? (
+                        <div className="flex flex-col items-center justify-center py-8 space-y-3">
+                          <div className="w-6 h-6 border-2 border-[#0066CC] border-t-transparent rounded-full animate-spin" />
+                          <p className="text-[#86868B] text-sm">Parsing MSG file...</p>
+                        </div>
+                      ) : job.status === 'error' ? (
+                        <div className="p-4 bg-red-50 border border-red-100 rounded-2xl flex items-center gap-3 text-red-600">
+                          <AlertCircle size={20} />
+                          <p className="text-sm font-medium">{job.error || 'Wystąpił błąd'}</p>
+                        </div>
+                      ) : (
+                        <div className="space-y-6">
+                          {/* AI Summary Section */}
+                          <div className="bg-[#F5F5F7] rounded-2xl p-5 relative">
+                            <div className="flex items-center justify-between mb-3">
+                              <h4 className="text-[10px] font-bold uppercase tracking-widest text-[#86868B]">AI Analysis</h4>
+                              {job.summary && !job.isGenerating && (
+                                <button 
+                                  onClick={() => copyToClipboard(job.summary!)}
+                                  className="p-1.5 hover:bg-white rounded-lg transition-colors text-[#86868B] hover:text-[#1D1D1F]"
+                                >
+                                  {copied ? <Check size={14} className="text-emerald-500" /> : <Copy size={14} />}
+                                </button>
+                              )}
+                            </div>
+                            
+                            <div className="font-mono text-xs leading-relaxed whitespace-pre-wrap">
+                              {job.isGenerating ? (
+                                <div className="flex items-center gap-2 py-2">
+                                  <div className="w-3 h-3 border-2 border-[#0066CC] border-t-transparent rounded-full animate-spin" />
+                                  <span className="text-[#86868B] animate-pulse">Analyzing attachments...</span>
+                                </div>
+                              ) : (
+                                job.summary
+                              )}
+                            </div>
+                          </div>
 
-                    {(emailData.attachments?.length || 0) > 0 ? (
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                        {emailData.attachments.map((att, idx) => (
-                          <motion.div
-                            key={idx}
-                            initial={{ opacity: 0, scale: 0.95 }}
-                            animate={{ opacity: 1, scale: 1 }}
-                            transition={{ delay: idx * 0.05 }}
-                            className="group flex items-center justify-between p-4 bg-[#F5F5F7] hover:bg-[#E8E8ED] rounded-2xl transition-colors"
-                          >
-                            <div className="flex items-center gap-3 min-w-0">
-                              <div className="w-10 h-10 bg-white rounded-lg flex items-center justify-center text-[#0066CC] shadow-sm">
-                                <FileText size={20} />
+                          {/* Email Details */}
+                          {job.emailData && (
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                              <div>
+                                <h4 className="text-[10px] font-bold uppercase tracking-widest text-[#86868B] mb-3">Email Info</h4>
+                                <div className="space-y-2">
+                                  <p className="text-sm font-semibold text-[#1D1D1F] line-clamp-1">{job.emailData.subject || '(No Subject)'}</p>
+                                  <div className="flex items-center gap-2 text-xs text-[#86868B]">
+                                    <User size={12} />
+                                    <span>{job.emailData.senderName || job.emailData.senderEmail}</span>
+                                  </div>
+                                  <div className="flex items-center gap-2 text-xs text-[#86868B]">
+                                    <Calendar size={12} />
+                                    <span>{formatDate(job.emailData.receivedTime)}</span>
+                                  </div>
+                                </div>
                               </div>
-                              <div className="min-w-0">
-                                <p className="text-sm font-medium truncate pr-2">
-                                  {att.fileName}
-                                </p>
-                                <p className="text-[10px] text-[#86868B] uppercase font-bold tracking-tight">
-                                  {((att.content?.length || 0) / 1024).toFixed(1)} KB
-                                </p>
+
+                              <div>
+                                <h4 className="text-[10px] font-bold uppercase tracking-widest text-[#86868B] mb-3">
+                                  Attachments ({job.emailData.attachments.length})
+                                </h4>
+                                <div className="max-h-[120px] overflow-y-auto custom-scrollbar pr-2 space-y-2">
+                                  {job.emailData.attachments.map((att, idx) => (
+                                    <div key={idx} className="flex items-center justify-between p-2 bg-[#F5F5F7] rounded-xl group">
+                                      <span className="text-[11px] font-medium truncate flex-1 pr-2">{att.fileName}</span>
+                                      <button 
+                                        onClick={() => downloadAttachment(att)}
+                                        className="p-1.5 bg-white rounded-lg text-[#0066CC] opacity-0 group-hover:opacity-100 transition-opacity"
+                                      >
+                                        <Download size={12} />
+                                      </button>
+                                    </div>
+                                  ))}
+                                </div>
                               </div>
                             </div>
-                            <button
-                              onClick={() => downloadAttachment(att)}
-                              className="w-10 h-10 rounded-full flex items-center justify-center bg-white text-[#1D1D1F] shadow-sm hover:bg-[#0066CC] hover:text-white transition-all active:scale-95"
-                              title="Download"
-                            >
-                              <Download size={18} />
-                            </button>
-                          </motion.div>
-                        ))}
-                      </div>
-                    ) : (
-                      <div className="text-center py-8 bg-[#F5F5F7] rounded-2xl border border-dashed border-[#D2D2D7]">
-                        <p className="text-[#86868B] text-sm italic">No attachments found in this email.</p>
-                      </div>
-                    )}
+                          )}
+                        </div>
+                      )}
+                    </AnimatePresence>
                   </div>
-                </div>
-              </motion.div>
-            )}
-          </AnimatePresence>
+                </motion.div>
+              ))}
+            </div>
+          </div>
         </main>
 
         <footer className="mt-12 text-center text-[12px] text-[#86868B]">
