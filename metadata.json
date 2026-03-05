@@ -1,0 +1,5 @@
+{
+  "name": "MSG Attachment Extractor and Descriptor",
+  "description": "Upload Outlook .msg files to extract and download attachments easily.",
+  "requestFramePermissions": []
+}
