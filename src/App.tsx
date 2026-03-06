@@ -1,10 +1,11 @@
 import React, { useState, useCallback, useEffect } from 'react';
-import MsgReader from 'msgreader';
+import MsgReader from '@kenjiuno/msgreader';
 import { Upload, FileText, Download, Mail, User, Calendar, Paperclip, X, AlertCircle, Copy, Check } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 import { GoogleGenAI } from "@google/genai";
+import heic2any from 'heic2any';
 import * as XLSX from 'xlsx';
 
 function cn(...inputs: ClassValue[]) {
@@ -16,6 +17,7 @@ interface Attachment {
   content: Uint8Array;
   dataId?: number;
   extension?: string;
+  isUnreadable?: boolean;
 }
 
 interface EmailData {
@@ -88,7 +90,11 @@ export default function App() {
         } else if (trimmedLine.startsWith('Załączniki:')) {
           isZalacznikiSection = true;
         } else if (isZalacznikiSection && trimmedLine) {
-          zalaczniki.push(`• ${trimmedLine}`);
+          if (trimmedLine === "Załącznikiem jest e-mail") {
+            zalaczniki.push(trimmedLine);
+          } else {
+            zalaczniki.push(`• ${trimmedLine}`);
+          }
         }
       });
 
@@ -154,7 +160,7 @@ Załączniki:
 
 Kategorie załączników (jedna etykieta na plik; wybierz najlepszą):
 dowód rejestracyjny
-oświadczenie sprawcy
+oświadczenie
 zdjęcia pojazdu
 zdjęcia uszkodzeń
 zdjęcie miejsca
@@ -177,8 +183,9 @@ Reguły klasyfikacji (stosuj w tej kolejności):
    - Jeżeli obraz to zbliżenie na konkretne uszkodzenia -> "zdjęcia uszkodzeń".
 3. Jeżeli plik ma strukturę faktury (numery, kwoty, NIP, słowo "Faktura"/"FV") -> "faktura/rachunek".
 4. Jeśli dokument ma formalny nagłówek/uwagi decyzyjne słowa typu "DECYZJA" -> "decyzja".
-5. Sprawdzaj nazwy plików i metadane (np. nazwa zawiera "oswiadczenie" -> "oświadczenie sprawcy", "dyspozycja" -> "dyspozycja wypłaty", "upowaznienie" lub "cesja" -> "upoważnienie/cesja").
-6. Jeśli nie da się rozpoznać jednoznacznie -> "inne".
+5. Sprawdzaj nazwy plików i metadane (np. nazwa zawiera "oswiadczenie" -> "oświadczenie", "dyspozycja" -> "dyspozycja wypłaty", "upowaznienie" lub "cesja" -> "upoważnienie/cesja").
+6. Jeśli plik jest oznaczony jako (nieczytelny/błąd odczytu) -> "Nieznany załącznik".
+7. Jeśli nie da się rozpoznać jednoznacznie -> "inne".
 
 Ważne: Pole "Data wpływu" MUSI być identyczne z "Data otrzymania maila" z sekcji "Dane wejściowe". Pod żadnym pozorem nie szukaj innej daty w załącznikach.
 
@@ -199,25 +206,94 @@ Data otrzymania maila: ${formatDate(data.receivedTime)}
         }
       ];
 
-      const attachmentsToProcess = data.attachments.slice(0, 10);
+      // Prioritize PDF files and process more than 10 attachments
+      const sortedAttachments = [...data.attachments].sort((a, b) => {
+        const extA = a.fileName.split('.').pop()?.toLowerCase();
+        const extB = b.fileName.split('.').pop()?.toLowerCase();
+        if (extA === 'pdf' && extB !== 'pdf') return -1;
+        if (extA !== 'pdf' && extB === 'pdf') return 1;
+        return 0;
+      });
+
+      const attachmentsToProcess = sortedAttachments;
       
       for (const att of attachmentsToProcess) {
+        if (att.isUnreadable) {
+          parts.push({ text: `Plik (nieczytelny/błąd odczytu): ${att.fileName}` });
+          continue;
+        }
+
         const ext = att.fileName.split('.').pop()?.toLowerCase();
-        const isImage = ['jpg', 'jpeg', 'png', 'webp'].includes(ext || '');
+        const isImage = ['jpg', 'jpeg', 'png', 'webp', 'heic', 'heif'].includes(ext || '');
         const isPdf = ext === 'pdf';
 
         if (isImage || isPdf) {
-          const base64 = btoa(
-            new Uint8Array(att.content).reduce(
-              (data, byte) => data + String.fromCharCode(byte),
-              ''
-            )
-          );
+          let base64 = '';
+          let mimeType = isPdf ? 'application/pdf' : `image/jpeg`;
+
+          if (isImage) {
+            try {
+              let blob = new Blob([att.content]);
+              
+              // Handle HEIC/HEIF conversion
+              if (ext === 'heic' || ext === 'heif') {
+                const converted = await heic2any({ blob, toType: "image/jpeg", quality: 0.7 });
+                blob = Array.isArray(converted) ? converted[0] : converted;
+              }
+
+              // Create thumbnail (max 200px)
+              base64 = await new Promise<string>((resolve, reject) => {
+                const img = new Image();
+                img.onload = () => {
+                  const canvas = document.createElement('canvas');
+                  const MAX_SIZE = 200;
+                  let width = img.width;
+                  let height = img.height;
+
+                  if (width > height) {
+                    if (width > MAX_SIZE) {
+                      height *= MAX_SIZE / width;
+                      width = MAX_SIZE;
+                    }
+                  } else {
+                    if (height > MAX_SIZE) {
+                      width *= MAX_SIZE / height;
+                      height = MAX_SIZE;
+                    }
+                  }
+
+                  canvas.width = width;
+                  canvas.height = height;
+                  const ctx = canvas.getContext('2d');
+                  ctx?.drawImage(img, 0, 0, width, height);
+                  resolve(canvas.toDataURL('image/jpeg', 0.8).split(',')[1]);
+                  URL.revokeObjectURL(img.src);
+                };
+                img.onerror = reject;
+                img.src = URL.createObjectURL(blob);
+              });
+            } catch (err) {
+              console.error(`Error processing image ${att.fileName}:`, err);
+              parts.push({ text: `Plik (błąd przetwarzania obrazu): ${att.fileName}` });
+              continue;
+            }
+          } else {
+            // For PDFs, use existing FileReader method
+            base64 = await new Promise<string>((resolve) => {
+              const blob = new Blob([att.content]);
+              const reader = new FileReader();
+              reader.onload = () => {
+                const result = reader.result as string;
+                resolve(result.split(',')[1]);
+              };
+              reader.readAsDataURL(blob);
+            });
+          }
           
           parts.push({
             inlineData: {
               data: base64,
-              mimeType: isPdf ? 'application/pdf' : `image/${ext === 'jpg' ? 'jpeg' : ext}`
+              mimeType: mimeType
             }
           });
           
@@ -232,7 +308,18 @@ Data otrzymania maila: ${formatDate(data.receivedTime)}
         contents: [{ parts }],
       });
 
-      setJobs(prev => prev.map(j => j.id === jobId ? { ...j, summary: response.text || "Błąd generowania podsumowania.", status: 'completed', isGenerating: false } : j));
+      let finalSummary = response.text || "Błąd generowania podsumowania.";
+      
+      // Check if any attachment is a .msg file
+      const hasMsgAttachment = data.attachments.some(att => 
+        att.fileName.toLowerCase().endsWith('.msg')
+      );
+
+      if (hasMsgAttachment) {
+        finalSummary += "\n\nZałącznikiem jest e-mail";
+      }
+
+      setJobs(prev => prev.map(j => j.id === jobId ? { ...j, summary: finalSummary, status: 'completed', isGenerating: false } : j));
     } catch (err) {
       console.error('Error generating summary:', err);
       setJobs(prev => prev.map(j => j.id === jobId ? { ...j, summary: "Wystąpił błąd podczas analizy załączników przez AI.", status: 'error', isGenerating: false } : j));
@@ -260,21 +347,53 @@ Data otrzymania maila: ${formatDate(data.receivedTime)}
       const jobId = newJobs[index].id;
       try {
         const arrayBuffer = await file.arrayBuffer();
-        const reader = new MsgReader(arrayBuffer);
-        const data = reader.getFileData();
+        
+        if (!arrayBuffer || arrayBuffer.byteLength === 0) {
+          throw new Error('Plik jest pusty lub nie mógł zostać odczytany.');
+        }
 
-        if (!data) throw new Error('Failed to parse MSG file data');
+        // Convert to Uint8Array which is often more stable for OLE parsers
+        const uint8Array = new Uint8Array(arrayBuffer);
+
+        // Basic OLE header check (D0 CF 11 E0 A1 B1 1A E1)
+        if (uint8Array.length < 8 || 
+            uint8Array[0] !== 0xD0 || uint8Array[1] !== 0xCF || 
+            uint8Array[2] !== 0x11 || uint8Array[3] !== 0xE0) {
+          throw new Error('Nieprawidłowy format pliku MSG (brak nagłówka OLE).');
+        }
+
+        let reader;
+        let data;
+        try {
+          reader = new MsgReader(uint8Array);
+          data = reader.getFileData();
+        } catch (parseErr: any) {
+          console.error('MsgReader internal error:', parseErr);
+          throw new Error(`Błąd wewnętrzny podczas analizy struktury pliku: ${parseErr.message || 'Nieprawidłowa długość tablicy lub uszkodzony format'}`);
+        }
+
+        if (!data) throw new Error('Nie udało się wyodrębnić danych z pliku MSG.');
 
         const rawAttachments = (Array.isArray(data.attachments) ? data.attachments : []).filter(Boolean);
         
         const attachments: Attachment[] = rawAttachments
           .map((att: any) => {
-            const fullAttachment = reader.getAttachment(att);
-            return {
-              fileName: fullAttachment.fileName || fullAttachment.name || att.fileName || att.name || 'unnamed_attachment',
-              content: fullAttachment.content || att.content || new Uint8Array(0),
-              extension: fullAttachment.extension || att.extension
-            };
+            try {
+              const fullAttachment = reader.getAttachment(att);
+              return {
+                fileName: fullAttachment.fileName || fullAttachment.name || att.fileName || att.name || 'unnamed_attachment',
+                content: fullAttachment.content || att.content || new Uint8Array(0),
+                extension: fullAttachment.extension || att.extension,
+                isUnreadable: false
+              };
+            } catch (e) {
+              console.error('Error extracting attachment:', e);
+              return {
+                fileName: att.fileName || att.name || 'unnamed_attachment',
+                content: new Uint8Array(0),
+                isUnreadable: true
+              };
+            }
           })
           .filter(att => {
             const name = att.fileName.toLowerCase();
@@ -297,6 +416,11 @@ Data otrzymania maila: ${formatDate(data.receivedTime)}
           receivedTime: data.messageDate || extractDateFromHeaders(data.headers) || data.creationTime,
           attachments: attachments
         };
+
+        if (attachments.length === 0) {
+          setJobs(prev => prev.filter(j => j.id !== jobId));
+          return;
+        }
 
         setJobs(prev => prev.map(j => j.id === jobId ? { ...j, emailData: parsedData, status: 'analyzing' } : j));
         generateSummary(jobId, parsedData);
